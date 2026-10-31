@@ -1,0 +1,17 @@
+# ChessDS settings. Copy this file to the root of the SD card as chessds.ini
+# (or into the same folder as chessds.nds).
+
+# WiFi network to join. Leave ssid empty to use the connection saved in the
+# console's own WiFi settings.
+#   DS / DS Lite: open or WEP networks only.
+#   DSi / 3DS running the game in DSi mode: WPA2 works too.
+ssid=ChessDS
+# WEP key (5/13 characters or 10/26 hex digits) or WPA2 password. Empty if open.
+password=
+
+# The Raspberry Pi running the bridge.
+host=10.42.0.1
+port=5555
+
+# Must match CHESSDS_SECRET in the Pi's bridge.env.
+secret=changeme

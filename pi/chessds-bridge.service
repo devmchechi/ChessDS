@@ -1,0 +1,15 @@
+# systemd user unit for the ChessDS bridge. install.sh fills in __DIR__ and
+# installs it in ~/.config/systemd/user.
+[Unit]
+Description=ChessDS Lichess bridge
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python -m chessds_bridge --config __DIR__/bridge.env
+# Also covers the network not being ready yet at boot.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

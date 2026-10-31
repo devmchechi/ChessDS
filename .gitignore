@@ -1,0 +1,14 @@
+# DS build output
+ds/build/
+ds/*.nds
+ds/*.elf
+
+# Python
+__pycache__/
+*.pyc
+pi/.venv/
+
+# Secrets: the Lichess token, the DS's WiFi password and pairing secret
+pi/bridge.env
+pi/hotspot.env
+ds/chessds.ini
