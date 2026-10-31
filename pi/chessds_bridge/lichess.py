@@ -2,8 +2,11 @@
 
 import json
 import logging
+import time
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from . import __version__
 
@@ -14,6 +17,22 @@ TIMEOUT = 15
 # Streams send a keep-alive newline every few seconds, so a long silence means
 # the connection is dead.
 STREAM_TIMEOUT = (10, 90)
+# Home routers silently drop idle connections, and reusing one of those fails
+# the request. Connections idle for longer than this are not reused.
+IDLE_RESET = 30
+
+
+def _session(token):
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {token}",
+        "User-Agent": f"ChessDS-bridge/{__version__}",
+    })
+    # Only retry when connecting failed, i.e. Lichess never got the request:
+    # retrying a challenge that did arrive would start a second game.
+    retry = Retry(total=2, connect=2, read=0, status=0, other=0, backoff_factor=0.5)
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
 
 
 class LichessError(Exception):
@@ -69,20 +88,28 @@ def _error_message(response):
 
 
 class Lichess:
-    def __init__(self, token, base_url=BASE_URL, session=None):
+    def __init__(self, token, base_url=BASE_URL):
         self.base_url = base_url.rstrip("/")
-        self.session = session or requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {token}",
-            "User-Agent": f"ChessDS-bridge/{__version__}",
-        })
+        # Streams get their own connections so the ones for single requests
+        # can be dropped while they're idle.
+        self.session = _session(token)
+        self.stream_session = _session(token)
+        self.last_request = time.monotonic()
 
     def _request(self, method, path, *, stream=False, timeout=TIMEOUT, **kwargs):
+        if stream:
+            session = self.stream_session
+        else:
+            session = self.session
+            if time.monotonic() - self.last_request > IDLE_RESET:
+                session.close()  # forget idle connections; the session stays usable
+            self.last_request = time.monotonic()
         try:
-            response = self.session.request(
+            response = session.request(
                 method, self.base_url + path, stream=stream, timeout=timeout, **kwargs
             )
         except requests.RequestException as e:
+            log.warning("%s %s failed: %s", method, path, e)
             raise LichessError(0, f"Network error ({e.__class__.__name__})") from e
         if response.status_code >= 400:
             message = _error_message(response)

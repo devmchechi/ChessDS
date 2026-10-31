@@ -22,6 +22,8 @@
 #define SERVER_TIMEOUT   (20 * FPS)
 #define HELLO_TIMEOUT    (10 * FPS)
 #define RETRY_DELAY      (3 * FPS)
+#define WIFI_RETRY_DELAY (10 * FPS)
+#define REJOIN_AFTER     3 // failed attempts to reach the Pi before rejoining WiFi
 #define MAX_LINES_FRAME  64
 #define DPAD             (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)
 
@@ -43,6 +45,7 @@ static ConnState conn;
 static uint32_t conn_timer; // when HELLO was sent, or when to retry
 static uint32_t last_rx;
 static uint32_t last_ping;
+static int pi_failures; // in a row, since the last login
 static char username[NAME_LEN];
 
 static Screen screen = SCREEN_CONNECT;
@@ -232,8 +235,17 @@ static void draw_connect(void)
     snprintf(title, sizeof(title), "Raspberry Pi  %s:%d", config.host, config.port);
     draw_step(88, pi_dot, title, pi_status());
 
-    if (conn == CONN_WIFI_FAILED || conn == CONN_DENIED)
+    if (conn == CONN_WIFI_FAILED)
+    {
+        char label[32];
+        snprintf(label, sizeof(label), "Retry now (%lus)",
+                 (unsigned long)((int32_t)(conn_timer - frame_count) / FPS + 1));
+        ui_button(64, 138, SCREEN_W - 128, 26, UI_PRIMARY, label, NULL);
+    }
+    else if (conn == CONN_DENIED)
+    {
         ui_button(64, 138, SCREEN_W - 128, 26, UI_PRIMARY, "Retry", NULL);
+    }
 
     char settings[64];
     snprintf(settings, sizeof(settings), "Settings: %s", config_path ? config_path : "built-in defaults");
@@ -252,6 +264,7 @@ static void retry_later(void)
 {
     conn = CONN_RETRY;
     conn_timer = frame_count + RETRY_DELAY;
+    pi_failures++;
 }
 
 static void start_tcp(void)
@@ -295,12 +308,13 @@ static void update_connection(uint32_t keys, const Touch *touch)
             else if (wifi == WIFI_FAILED)
             {
                 conn = CONN_WIFI_FAILED;
+                conn_timer = frame_count + WIFI_RETRY_DELAY;
                 app_log(C_RED, "WiFi: %s", net_wifi_status());
             }
             break;
 
         case CONN_WIFI_FAILED:
-            if (retry_pressed)
+            if (retry_pressed || (int32_t)(frame_count - conn_timer) >= 0)
                 start_wifi();
             break;
 
@@ -343,8 +357,20 @@ static void update_connection(uint32_t keys, const Touch *touch)
             break;
 
         case CONN_RETRY:
-            if ((int32_t)(frame_count - conn_timer) >= 0)
+            if ((int32_t)(frame_count - conn_timer) < 0)
+                break;
+            // The WiFi link can stall while still looking connected; joining
+            // again fixes it.
+            if (pi_failures >= REJOIN_AFTER)
+            {
+                pi_failures = 0;
+                app_log(C_TEXT_DIM, "Rejoining the WiFi network");
+                start_wifi();
+            }
+            else
+            {
                 start_tcp();
+            }
             break;
     }
 
@@ -379,6 +405,7 @@ static void handle_line(char *line)
         snprintf(username, sizeof(username), "%s", name != NULL ? name : "?");
         conn = CONN_READY;
         last_ping = frame_count;
+        pi_failures = 0;
         home_dirty = true;
         game_begin_sync();
         lobby_reset();

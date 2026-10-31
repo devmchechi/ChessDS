@@ -16,12 +16,14 @@
 
 #define SCAN_TIMEOUT    (15 * FPS)
 #define ASSOC_TIMEOUT   (30 * FPS)
+#define JOIN_ATTEMPTS   5
 #define CONNECT_TIMEOUT (8 * FPS)
 #define SEND_RETRIES    120
 
 static WifiState wifi_state = WIFI_IDLE;
 static const Config *wifi_cfg;
 static int wifi_frames;
+static int wifi_attempt;
 static char wifi_status[64] = "Not started";
 
 static int sock = -1;
@@ -44,15 +46,27 @@ static void wifi_fail(const char *message)
     snprintf(wifi_status, sizeof(wifi_status), "%s", message);
 }
 
-void net_wifi_connect(const Config *cfg)
+// Progress message, with the attempt number after the first try.
+static void set_status(const char *fmt, ...)
 {
-    if (wifi_state == WIFI_CONNECTING || wifi_state == WIFI_CONNECTED)
-        Wifi_DisconnectAP();
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(wifi_status, sizeof(wifi_status), fmt, args);
+    va_end(args);
 
-    wifi_cfg = cfg;
+    if (wifi_attempt > 1)
+    {
+        size_t len = strlen(wifi_status);
+        snprintf(wifi_status + len, sizeof(wifi_status) - len, " (try %d/%d)", wifi_attempt,
+                 JOIN_ATTEMPTS);
+    }
+}
+
+static void begin_attempt(void)
+{
     wifi_frames = 0;
 
-    if (cfg->ssid[0] == '\0')
+    if (wifi_cfg->ssid[0] == '\0')
     {
         if (Wifi_GetData(WIFIGETDATA_NUMWFCAPS, 0, NULL) <= 0)
         {
@@ -61,13 +75,37 @@ void net_wifi_connect(const Config *cfg)
         }
         Wifi_AutoConnect();
         wifi_state = WIFI_CONNECTING;
-        snprintf(wifi_status, sizeof(wifi_status), "Using console WiFi settings");
+        set_status("Using console WiFi settings");
         return;
     }
 
     Wifi_ScanMode();
     wifi_state = WIFI_SEARCHING;
-    snprintf(wifi_status, sizeof(wifi_status), "Looking for %s", cfg->ssid);
+    set_status("Looking for %s", wifi_cfg->ssid);
+}
+
+void net_wifi_connect(const Config *cfg)
+{
+    if (wifi_state == WIFI_CONNECTING || wifi_state == WIFI_CONNECTED)
+        Wifi_DisconnectAP();
+
+    wifi_cfg = cfg;
+    wifi_attempt = 1;
+    begin_attempt();
+}
+
+// Joining often fails for no lasting reason, and the DSi WiFi driver doesn't
+// retry by itself, so try a few times before reporting an error.
+static void join_failed(const char *message)
+{
+    if (wifi_attempt >= JOIN_ATTEMPTS)
+    {
+        wifi_fail(message);
+        return;
+    }
+    Wifi_DisconnectAP();
+    wifi_attempt++;
+    begin_attempt();
 }
 
 static bool find_access_point(const char *ssid, Wifi_AccessPoint *out)
@@ -165,7 +203,7 @@ WifiState net_wifi_update(void)
             join_access_point(&ap);
             wifi_state = WIFI_CONNECTING;
             wifi_frames = 0;
-            snprintf(wifi_status, sizeof(wifi_status), "Joining %s", wifi_cfg->ssid);
+            set_status("Joining %s", wifi_cfg->ssid);
             break;
         }
 
@@ -177,17 +215,16 @@ WifiState net_wifi_update(void)
                 wifi_state = WIFI_CONNECTED;
                 snprintf(wifi_status, sizeof(wifi_status), "Connected");
             }
-            else if (status == ASSOCSTATUS_CANNOTCONNECT)
+            else if (status == ASSOCSTATUS_CANNOTCONNECT || wifi_frames > ASSOC_TIMEOUT)
             {
-                wifi_fail("Can't connect (check password)");
-            }
-            else if (wifi_frames > ASSOC_TIMEOUT)
-            {
-                wifi_fail("Timed out joining the network");
+                // The driver can't tell a wrong password from a weak signal.
+                char message[64];
+                snprintf(message, sizeof(message), "Can't join %s (signal/password)", wifi_cfg->ssid);
+                join_failed(message);
             }
             else
             {
-                snprintf(wifi_status, sizeof(wifi_status), "%s", ASSOCSTATUS_STRINGS[status]);
+                set_status("%s", ASSOCSTATUS_STRINGS[status]);
             }
             break;
         }
